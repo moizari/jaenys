@@ -1,0 +1,78 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jaenys"
+dynamic = ["version"]
+description = "Fail-closed guard against redaction drift: refuses to serve when detection state and serving filter cannot be proven in sync."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [
+    { name = "Moiz Ari", email = "moiz.ari@outlook.com" },
+]
+keywords = [
+    "redaction-drift",
+    "fail-closed-redaction",
+    "data-privacy",
+    "redaction",
+    "dlp",
+    "access-control",
+    "fail-closed",
+    "sql",
+    "data-governance",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Security",
+    "Topic :: Database",
+    "Typing :: Typed",
+]
+# Zero runtime dependencies is a feature: the engine only reads through
+# connections/adapters the caller already owns (PEP 249 or the small
+# StoreAdapter protocol), so nothing here can go stale or need patching.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/moizari/jaenys"
+Repository = "https://github.com/moizari/jaenys"
+Issues = "https://github.com/moizari/jaenys/issues"
+
+[project.scripts]
+jaenys = "jaenys.cli:main"
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[tool.hatch.version]
+path = "src/jaenys/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jaenys", "src/local_llm_guard"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/examples",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/CONTRIBUTING.md",
+    "/SECURITY.md",
+    "/LICENSE",
+    "/NOTICE",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
