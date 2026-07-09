@@ -90,38 +90,35 @@ def validate_name(name: str, *, kind: str = "identifier") -> str:
     return name
 
 
+def validate_namespace(namespace: str, *, kind: str = "namespace") -> str:
+    """Validate one identifier or a database.schema identifier pair."""
+
+    if not isinstance(namespace, str):
+        raise RedactionDriftError(f"unsafe {kind}: <{type(namespace).__name__}>")
+    parts = namespace.split(".")
+    if not 1 <= len(parts) <= 2 or any(not part for part in parts):
+        raise RedactionDriftError(f"unsafe {kind}: <str>")
+    for part in parts:
+        validate_name(part, kind=kind)
+    return namespace
+
+
 def _origin_suffix(origin: str) -> str:
     return f" at {origin}" if origin else ""
 
 
-# Cap on how much of an offending value's repr appears in a refusal message.
-# These strings surface in status()/adapter_status()["refusal"] and on CLI
-# stderr -- surfaces documented as emitting counts, never record content -- so a
-# corrupt id/flag column holding record text (e.g. a verbatim SSN) must not
-# leak in full.  Short reprs ('abc', '3.7') stay intact; only long ones are
-# clipped to their head plus a marker.
-_MAX_REPR_LEN = 30
-
-
 def _safe_repr(value: Any) -> str:
-    """Return ``repr(value)`` truncated so no record content leaks in full.
+    """Describe a value without embedding stored data in refusal text."""
 
-    Reprs at or under :data:`_MAX_REPR_LEN` are returned unchanged; longer
-    ones are cut to their leading characters with a trailing ``...`` marker
-    so the tail -- which may hold sensitive record text from a corrupt
-    column -- never appears.
-    """
-
-    text = repr(value)
-    if len(text) <= _MAX_REPR_LEN:
-        return text
-    return text[:_MAX_REPR_LEN] + "..."
+    if value is None:
+        return "None"
+    return f"<{type(value).__name__}>"
 
 
 def _coerce_int(value: Any, *, what: str, origin: str) -> int:
     """Shared fail-closed body for :func:`coerce_record_id` / :func:`coerce_flag`.
 
-    Accepts ints (including ``bool``, per Python semantics), digit strings,
+    Accepts ints, digit strings,
     and integral floats/decimals (``3.0`` / ``Decimal("3")`` -- checked with
     ``int(value) == value`` so a non-integral value is refused rather than
     truncated; ``3.7`` truncating to ``3`` could silently mis-classify a
@@ -133,13 +130,17 @@ def _coerce_int(value: Any, *, what: str, origin: str) -> int:
     ``None`` and junk strings raise :class:`RedactionDriftError` instead
     of a raw ValueError/TypeError.
 
-    The offending value is rendered through :func:`_safe_repr`, which clips
-    long reprs so a corrupt column carrying record text cannot leak verbatim
-    into a refusal message that later surfaces in status reports or on stderr.
+    The offending value is rendered through :func:`_safe_repr`, which reports
+    only the value type so a corrupt column cannot leak record data into a
+    refusal message that later surfaces in status reports or on stderr.
     """
 
     if value is None:
         raise RedactionDriftError(f"{what} is missing{_origin_suffix(origin)}: {_safe_repr(value)}")
+    if what == "record id" and isinstance(value, bool):
+        raise RedactionDriftError(
+            f"{what} is not an integer{_origin_suffix(origin)}: {_safe_repr(value)}"
+        )
     if isinstance(value, str) and not re.fullmatch(r"-?[0-9]+", value):
         # int() accepts underscores, surrounding whitespace, a leading '+',
         # and non-ASCII digits; each would silently remap a corrupt id to a
@@ -176,7 +177,7 @@ def coerce_flag(value: Any, *, origin: str = "") -> int:
     See :func:`_coerce_int` for the accepted numeric shapes and refusal rules.
     On top of that, the flag domain is exactly ``{0, 1}``: any other integral
     value (``2``, ``-1``, ``"7"`` ...) is refused with a :class:`RedactionDriftError`.
-    ``bool`` still coerces to ``1``/``0`` and is accepted.  This closes a
+    ``bool`` still coerces to ``1``/``0`` and is accepted. This closes a
     fail-open leak where a corrupt/nonstandard flag would be treated as
     "not flagged" on the Python/adapter path and served, while the SQL
     predicate (``flag = 0``) excludes it -- the store must refuse, not leak.
@@ -262,7 +263,10 @@ class SchemaMapping:
         ):
             value = getattr(self, optional_name)
             if value is not None:
-                validate_name(value, kind=optional_name)
+                if optional_name == "span_namespace":
+                    validate_namespace(value, kind=optional_name)
+                else:
+                    validate_name(value, kind=optional_name)
         for reason_name in ("reason_flagged", "reason_span"):
             value = getattr(self, reason_name)
             if not isinstance(value, str) or not value:

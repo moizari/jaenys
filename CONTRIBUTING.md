@@ -60,8 +60,8 @@ examples/                 runnable walkthroughs: demo_sql_guard.py,
 3. **Corruption refuses.** Stored ids and flags route through the
    fail-closed coercers (`coerce_record_id` / `coerce_flag`); the flag
    domain is exactly `{0, 1}`. Refusal messages name at most the offending id
-   or a truncated value, never full record content (`_safe_repr` clips long
-   reprs for this reason); status surfaces stay counts-only.
+   or a stored value; `_safe_repr` reports only the value type for this
+   reason, and status surfaces stay counts-only.
 4. **Domain-neutral language.** Code, tests, comments, and docs speak in
    generic terms (records, flags, spans, tickets); keep it that way in new
    contributions.

@@ -41,6 +41,7 @@ from .guard import (
     AttachedGuard,
     _assert_attached_flag_layer_current,
     _assert_drift_witness_satisfied,
+    _assert_primary_flags_well_formed,
     _assert_primary_ids_well_formed,
     _has_flagged,
     _mirror_flagged_ids,
@@ -215,6 +216,7 @@ def attached_guard(
     if not usable_span_db(path):
         try:
             _assert_primary_ids_well_formed(conn, mapping=mapping, dialect=SQLITE)
+            _assert_primary_flags_well_formed(conn, mapping=mapping, dialect=SQLITE)
             has_flagged = _has_flagged(conn, mapping=mapping, dialect=SQLITE)
         except RedactionDriftError:
             raise
@@ -300,6 +302,7 @@ def attached_guard(
     try:
         try:
             _assert_primary_ids_well_formed(conn, mapping=mapping, dialect=SQLITE)
+            _assert_primary_flags_well_formed(conn, mapping=mapping, dialect=SQLITE)
             sources = span_sources(conn, mapping=mapping, dialect=SQLITE, namespace=attach_name)
             _assert_attached_flag_layer_current(
                 conn, mapping=mapping, dialect=SQLITE, namespace=attach_name, sources=sources

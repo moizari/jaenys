@@ -148,11 +148,17 @@ class DynamoDBAdapter:
     def _record_flags(self) -> list[tuple[int, int]]:
         items = self._scan_all(self._records_table)
         rows: list[tuple[int, int]] = []
+        seen_ids: set[int] = set()
         for item in items:
             record_id = coerce_record_id(
                 self._required(item, self.mapping.record_id_column, layer="records"),
                 origin=self.name,
             )
+            if record_id in seen_ids:
+                raise RedactionDriftError(
+                    f"{self.name} store has duplicate record ids; refusing normal output."
+                )
+            seen_ids.add(record_id)
             flag = coerce_flag(
                 self._required(item, self.mapping.flag_column, layer="records"),
                 origin=self.name,

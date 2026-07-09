@@ -91,13 +91,25 @@ def test_status_stays_under_param_budget_with_large_span_set(
     assert report["deliverable_with_blur"] == 3
 
 
-def test_include_blur_excludes_null_flag_rows(store_pair: tuple[Path, Path]) -> None:
-    """A NULL flag must not serve clear on the blur surface (fail closed).
+def test_generic_status_reports_loaded_guard_drift(store_pair: tuple[Path, Path]) -> None:
+    primary, span = store_pair
+    ids = build_primary_db(primary, [0, 1, 0])
+    create_span_member_table(span, [])
+    create_mirror_table(span, flagged_ids=[ids[1]], span_ids=[])
+    guard = sqlite.load_guard(span)
+    with closing(sqlite3.connect(primary)) as conn:
+        conn.execute("UPDATE records SET sensitive = 1 WHERE record_id = ?", (ids[0],))
+        conn.commit()
 
-    Nullable flag columns are realistic (rows predating an
-    ``ALTER TABLE ... ADD COLUMN``); the blur surface must screen them out
-    like every other path instead of serving them unmarked.
-    """
+    with closing(sqlite.open_readonly(primary)) as conn:
+        report = guard_status(conn, guard)
+
+    assert report["layers_in_sync"] is False
+    assert "stale" in report["refusal"]
+
+
+def test_attached_guard_refuses_null_flag_rows(store_pair: tuple[Path, Path]) -> None:
+    """A NULL primary flag refuses the whole attached serve path."""
 
     primary, span = store_pair
     conn = sqlite3.connect(primary)
@@ -124,15 +136,9 @@ def test_include_blur_excludes_null_flag_rows(store_pair: tuple[Path, Path]) -> 
         ).fetchall()
         assert [row[0] for row in rows] == [1, 2]
 
-        # The NULL-flag row is excluded per row, so serving the rest is safe:
-        # one malformed row must not take the whole dataset offline.
-        with sqlite.attached_guard(conn, span) as guard:
-            attached = guard.predicate("r", include_blur=True)
-            rows = conn.execute(
-                f"SELECT r.record_id FROM records r WHERE {attached.sql} ORDER BY r.record_id",
-                attached.params,
-            ).fetchall()
-        assert [row[0] for row in rows] == [1, 2]
+        with pytest.raises(RedactionDriftError, match="flag that is not 0 or 1"):
+            with sqlite.attached_guard(conn, span):
+                pass
 
 
 def test_attached_guard_non_uri_connection_serves_or_names_the_culprit(
@@ -191,14 +197,48 @@ def test_junk_span_member_id_refuses_at_load(store_pair: tuple[Path, Path]) -> N
         sqlite.load_guard(span)
 
 
+def test_attached_guard_refuses_non_integer_primary_record_id(
+    store_pair: tuple[Path, Path],
+) -> None:
+    primary, span = store_pair
+    conn = sqlite3.connect(primary)
+    conn.execute("CREATE TABLE records (record_id TEXT PRIMARY KEY, sensitive INTEGER NOT NULL)")
+    conn.execute("INSERT INTO records VALUES ('not-an-integer', 0)")
+    conn.commit()
+    conn.close()
+    create_span_member_table(span, [])
+    create_mirror_table(span, span_ids=[])
+
+    with closing(sqlite.open_readonly(primary)) as conn:
+        with pytest.raises(
+            RedactionDriftError, match="record id in records is not a supported integer"
+        ):
+            with sqlite.attached_guard(conn, span):
+                pass
+
+
+def test_attached_guard_refuses_out_of_domain_primary_flag(
+    store_pair: tuple[Path, Path],
+) -> None:
+    primary, span = store_pair
+    conn = sqlite3.connect(primary)
+    conn.execute("CREATE TABLE records (record_id INTEGER PRIMARY KEY, sensitive INTEGER NOT NULL)")
+    conn.executemany("INSERT INTO records VALUES (?, ?)", [(1, 0), (2, 2)])
+    conn.commit()
+    conn.close()
+    create_span_member_table(span, [])
+    create_mirror_table(span, span_ids=[])
+
+    with closing(sqlite.open_readonly(primary)) as conn:
+        with pytest.raises(RedactionDriftError, match="flag that is not 0 or 1"):
+            with sqlite.attached_guard(conn, span):
+                pass
+
+
 def test_attached_guard_refuses_duplicate_primary_record_id(
     store_pair: tuple[Path, Path],
 ) -> None:
-    """A non-unique id cannot address a flag or a span to one record.
-
-    This is checked in SQL so the broad serve path stays cheap on a large
-    store instead of reading every id into memory.
-    """
+    """A non-unique id cannot address a flag or a span to one record."""
 
     primary, span = store_pair
     conn = sqlite3.connect(primary)
@@ -209,9 +249,8 @@ def test_attached_guard_refuses_duplicate_primary_record_id(
     create_span_member_table(span, [])
     create_mirror_table(span, span_ids=[])
 
-    # The refusal names the offending id so the operator can go straight to it.
     with closing(sqlite.open_readonly(primary)) as conn:
-        with pytest.raises(RedactionDriftError, match="record id 1 in records is not unique"):
+        with pytest.raises(RedactionDriftError, match="record id values in records are not unique"):
             with sqlite.attached_guard(conn, span):
                 pass
 
@@ -232,8 +271,8 @@ def test_attached_guard_names_a_row_missing_its_id(store_pair: tuple[Path, Path]
                 pass
 
 
-def test_filter_visible_ids_excludes_null_flag_rows(store_pair: tuple[Path, Path]) -> None:
-    """A NULL flag fails closed per row (excluded), matching the flag = 0 clause."""
+def test_filter_visible_ids_refuses_null_flag_rows(store_pair: tuple[Path, Path]) -> None:
+    """A NULL primary flag refuses the bounded id path too."""
 
     primary, span = store_pair
     conn = sqlite3.connect(primary)
@@ -261,9 +300,8 @@ def test_filter_visible_ids_excludes_null_flag_rows(store_pair: tuple[Path, Path
     # No flagged rows and no span layer: the flag-filter-only guard is in sync.
     guard = sqlite.load_guard(span)
     with closing(sqlite.open_readonly(primary)) as conn:
-        visible = filter_visible_ids(conn, [null_flag_id, normal_id], guard=guard)
-
-    assert visible == [normal_id]
+        with pytest.raises(RedactionDriftError, match="flag that is not 0 or 1"):
+            filter_visible_ids(conn, [null_flag_id, normal_id], guard=guard)
 
 
 def test_filter_visible_ids_junk_flag_value_refuses(store_pair: tuple[Path, Path]) -> None:
@@ -288,7 +326,7 @@ def test_filter_visible_ids_junk_flag_value_refuses(store_pair: tuple[Path, Path
 
     guard = sqlite.load_guard(span)
     with closing(sqlite.open_readonly(primary)) as conn:
-        with pytest.raises(RedactionDriftError, match="flag is not an integer"):
+        with pytest.raises(RedactionDriftError, match="flag that is not 0 or 1"):
             filter_visible_ids(conn, [1], guard=guard)
 
 
@@ -302,16 +340,15 @@ def test_status_and_cli_report_corrupt_flag_as_unhealthy(
     conn.commit()
     conn.close()
 
-    with pytest.raises(RedactionDriftError, match="has a flag that is not 0 or 1") as excinfo:
+    with pytest.raises(RedactionDriftError, match="flag that is not 0 or 1") as excinfo:
         sqlite.status(primary, span)
-    # The refusal names the exact record so the operator knows where to look.
-    assert "record 1 in records" in str(excinfo.value)
+    assert "record 1" not in str(excinfo.value)
 
     exit_code = cli_main(["--primary-db", str(primary), "--span-db", str(span)])
     captured = capsys.readouterr()
     assert exit_code == 1
     assert captured.out == ""
-    assert "record 1 in records has a flag that is not 0 or 1" in captured.err
+    assert "a record in records has a flag that is not 0 or 1" in captured.err
 
 
 def test_status_names_the_record_with_a_missing_flag(store_pair: tuple[Path, Path]) -> None:
@@ -322,7 +359,7 @@ def test_status_names_the_record_with_a_missing_flag(store_pair: tuple[Path, Pat
     conn.commit()
     conn.close()
 
-    with pytest.raises(RedactionDriftError, match="record 7 in records has no flag"):
+    with pytest.raises(RedactionDriftError, match="a record in records has a flag"):
         sqlite.status(primary, span)
 
 

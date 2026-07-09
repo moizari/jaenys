@@ -30,11 +30,6 @@ class TestSharedCoercionBehavior:
         assert coerce(1) == 1
         assert coerce(0) == 0
 
-    def test_accepts_bool(self, coerce) -> None:
-        # bool is an int subclass in Python; True/False coerce like 1/0.
-        assert coerce(True) == 1
-        assert coerce(False) == 0
-
     def test_accepts_digit_string(self, coerce) -> None:
         assert coerce("1") == 1
         assert coerce("0") == 0
@@ -79,8 +74,8 @@ class TestSharedCoercionBehavior:
         with pytest.raises(RedactionDriftError):
             coerce("")
 
-    def test_message_names_offending_value(self, coerce) -> None:
-        with pytest.raises(RedactionDriftError, match=r"abc"):
+    def test_message_names_offending_value_type(self, coerce) -> None:
+        with pytest.raises(RedactionDriftError, match=r"<str>"):
             coerce("abc")
 
     def test_message_names_origin_when_given(self, coerce) -> None:
@@ -110,6 +105,10 @@ class TestRecordIdSpecificAccepts:
     def test_accepts_arbitrary_integral_decimal(self) -> None:
         assert coerce_record_id(Decimal("3")) == 3
 
+    def test_rejects_bool(self) -> None:
+        with pytest.raises(RedactionDriftError, match="record id is not an integer"):
+            coerce_record_id(True)
+
 
 class TestFlagDomainRejections:
     """``coerce_flag`` refuses any integral value outside ``{0, 1}`` (Fix 1a);
@@ -124,8 +123,12 @@ class TestFlagDomainRejections:
         coerce_record_id(value)
 
     def test_out_of_domain_message_names_value_and_origin(self) -> None:
-        with pytest.raises(RedactionDriftError, match=r"flag must be 0 or 1 at my-store: 2"):
+        with pytest.raises(RedactionDriftError, match=r"flag must be 0 or 1 at my-store"):
             coerce_flag(2, origin="my-store")
+
+    def test_accepts_bool(self) -> None:
+        assert coerce_flag(True) == 1
+        assert coerce_flag(False) == 0
 
 
 @pytest.mark.parametrize("bad", ["1_0", " 7 ", "+7", "٧"])
@@ -157,26 +160,17 @@ def test_coerce_flag_message_mentions_flag() -> None:
         coerce_flag(None)
 
 
-def test_long_junk_repr_is_truncated_in_message() -> None:
-    # A corrupt id/flag column can carry record text; refusal messages surface
-    # in status()/adapter_status()["refusal"] and on CLI stderr, so the value
-    # is clipped to a short head and the tail (potentially sensitive) must not
-    # appear verbatim.
-    head = "patient-SSN-123456789-"
-    tail = "-CONFIDENTIAL-TAIL-THAT-MUST-NOT-LEAK"
-    junk = head + tail
+def test_refusal_does_not_echo_corrupt_value() -> None:
+    junk = "patient-SSN-123456789-CONFIDENTIAL"
     with pytest.raises(RedactionDriftError) as exc_info:
         coerce_record_id(junk)
     message = str(exc_info.value)
-    assert head[:10] in message  # truncated head is present
-    assert tail not in message  # tail content is not leaked
-    assert "..." in message  # truncation marker present
+    assert junk not in message
+    assert "<str>" in message
 
 
-def test_short_repr_appears_in_full() -> None:
-    # Short values must still show in full so operators can act on them and
-    # the existing message-matching tests keep passing.
-    with pytest.raises(RedactionDriftError, match=r"'abc'"):
+def test_refusal_reports_value_type_only() -> None:
+    with pytest.raises(RedactionDriftError, match=r"<str>"):
         coerce_record_id("abc")
-    with pytest.raises(RedactionDriftError, match=r"3\.7"):
+    with pytest.raises(RedactionDriftError, match=r"<float>"):
         coerce_record_id(3.7)

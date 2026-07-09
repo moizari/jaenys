@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-07-10
+
+- Fixed SQL serve paths so malformed primary ids and flags refuse before a
+  predicate can be used. Validation streams through the primary table rather
+  than materializing it in memory.
+- Fixed document adapters to reject duplicate mapped record ids before they
+  collapse into a set during freshness checks.
+- Fixed versioned span detection to require the join key on both source
+  tables, so incomplete schemas refuse before query execution.
+- Added SQL Server `database.schema` namespace support for cross-database
+  span layers and information-schema checks.
+- Made generic SQL status reports include layer-sync state, and removed raw
+  stored values from refusal messages.
+- Fixed MongoDB filters to include BSON boolean flags, which the core accepts
+  as the flag domain values `0` and `1`.
+- Updated the trusted-publishing workflow to Python 3.14 and current GitHub
+  Actions releases that run on Node 24.
+
+- Added `docs/CONFORMANCE.md`, a set of redaction drift checks mapped to the
+  existing test coverage.
+- Added `docs/COMPARISONS.md` and `docs/BEST_EFFORT_REDACTION.md` for
+  failure behavior, tradeoffs, and the prove-or-refuse guard design.
+- Linked the new docs from the README and included `docs/` in source
+  distributions.
+
 ## [0.1.0] - 2026-07-03
 
 Initial release.
@@ -19,8 +44,8 @@ Initial release.
 - The sensitivity-flag domain is strictly `{0, 1}` everywhere: any other
   value (`2`, `-1`, junk text) is treated as corruption and refused, never
   served as "not flagged". All stored ids and flags route through
-  fail-closed coercers, and refusal messages truncate offending values so
-  record content cannot leak into error strings.
+  fail-closed coercers, and refusal messages report value types without
+  embedding record data in error strings.
 - SQL backend over PEP 249 connections: SQLite (reference), PostgreSQL,
   MySQL/MariaDB, SQL Server, Oracle, and a generic ANSI dialect; predicate
   builders, single-connection anti-join guard, materialized two-store guard,

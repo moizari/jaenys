@@ -110,6 +110,16 @@ derivation. The error message says exactly that.
 | Contextually sensitive stretches | per-record decisions only | contiguous spans hide whole stretches, including neutral rows inside |
 | Flagged-but-deliverable records | binary allow/deny | explicit `BLUR` state for redacted presentation |
 
+## More reading
+
+- [The Redaction Drift Test Suite](docs/CONFORMANCE.md) lists the checks a
+  redaction pipeline should pass.
+- [Comparisons](docs/COMPARISONS.md) explains where Jaenys fits against
+  scrub-once ingest, re-sync pipelines, permission-aware search, and
+  Postgres RLS.
+- [Best-effort redaction is a leak with a delay](docs/BEST_EFFORT_REDACTION.md)
+  walks through the failure mode and the guard design.
+
 ## Quickstart (SQLite, stdlib only)
 
 Point a `SchemaMapping` at your table/column names, then let the guard build
@@ -380,7 +390,7 @@ structured output, use [Instructor](https://github.com/instructor-ai/instructor)
 [Guardrails](https://github.com/guardrails-ai/guardrails), or
 [Outlines](https://github.com/dottxt-ai/outlines).
 
-## Non-goals and positioning
+## Non-goals
 
 - **Not an entity detector.** The engine never decides *what* is sensitive;
   it governs visibility of whatever your flag layer and span derivation say.

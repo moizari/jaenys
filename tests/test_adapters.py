@@ -787,15 +787,47 @@ def test_mongo_counts_flag_stored_as_boolean() -> None:
 def test_mongo_visibility_filter_shapes() -> None:
     adapter = MongoHarness(RECORDS).adapter
     assert adapter.visibility_filter([4, 5, 6]) == {
-        "$and": [{"sensitive": 0}, {"record_id": {"$nin": [4, 5, 6]}}]
+        "$and": [{"sensitive": {"$in": [0, False]}}, {"record_id": {"$nin": [4, 5, 6]}}]
     }
     # include_blur keeps a flag clause: a document with a missing/null/corrupt
     # flag must not serve clear on the blur surface.
     assert adapter.visibility_filter([6, 5, 4], include_blur=True) == {
-        "$and": [{"sensitive": {"$in": [0, 1]}}, {"record_id": {"$nin": [4, 5, 6]}}]
+        "$and": [
+            {"sensitive": {"$in": [0, 1, False, True]}},
+            {"record_id": {"$nin": [4, 5, 6]}},
+        ]
     }
-    assert adapter.visibility_filter([]) == {"sensitive": 0}
-    assert adapter.visibility_filter([], include_blur=True) == {"sensitive": {"$in": [0, 1]}}
+    assert adapter.visibility_filter([]) == {"sensitive": {"$in": [0, False]}}
+    assert adapter.visibility_filter([], include_blur=True) == {
+        "sensitive": {"$in": [0, 1, False, True]}
+    }
+
+
+@pytest.mark.parametrize("harness_name", ["mongodb", "dynamodb", "couchbase", "firestore"])
+def test_document_adapter_duplicate_record_id_refuses(harness_name: str) -> None:
+    harness = HARNESSES[harness_name]({1: 0, 2: 1})
+    mapping = harness.mapping
+    if harness_name == "mongodb":
+        harness.primary._collections[mapping.record_table].append(
+            {mapping.record_id_column: 1, mapping.flag_column: 0}
+        )
+    elif harness_name == "dynamodb":
+        harness.records_table.items.append(
+            {mapping.record_id_column: Decimal(1), mapping.flag_column: Decimal(0)}
+        )
+    elif harness_name == "couchbase":
+        harness.records_collection.docs["duplicate"] = {
+            mapping.record_id_column: 1,
+            mapping.flag_column: 0,
+        }
+    else:
+        harness.client.collection(mapping.record_table).docs()["duplicate"] = {
+            mapping.record_id_column: 1,
+            mapping.flag_column: 0,
+        }
+
+    with pytest.raises(RedactionDriftError, match="duplicate record ids"):
+        assert_adapter_current(harness.adapter)
 
 
 def test_mongo_visibility_filter_refuses_non_integral_span_ids() -> None:

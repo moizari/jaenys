@@ -11,7 +11,7 @@ from .reasoning import (
 )
 from .urls import DEFAULT_ALLOWED_HOSTS, LocalEndpointError, enforce_local_url
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "enforce_local_url",

@@ -130,6 +130,7 @@ class CouchbaseAdapter:
     def _record_flags(self) -> list[tuple[int, int]]:
         docs = self._run_scan(self._records_collection)
         rows: list[tuple[int, int]] = []
+        seen_ids: set[int] = set()
         for doc in docs:
             record_id = coerce_record_id(
                 self._required(
@@ -137,6 +138,11 @@ class CouchbaseAdapter:
                 ),
                 origin=self.name,
             )
+            if record_id in seen_ids:
+                raise RedactionDriftError(
+                    f"{self.name} store has duplicate record ids; refusing normal output."
+                )
+            seen_ids.add(record_id)
             flag = coerce_flag(
                 self._required(doc, self.mapping.flag_column, collection=self.mapping.record_table),
                 origin=self.name,

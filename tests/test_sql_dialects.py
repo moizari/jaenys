@@ -290,6 +290,15 @@ def test_explicit_namespace_overrides_current_schema_scoping() -> None:
     assert params == ("records", "span_layer")
 
 
+def test_mssql_database_schema_namespace_uses_cross_database_introspection() -> None:
+    conn = RecordingConnection()
+    table_exists(conn, "records", dialect=MSSQL, namespace="span_db.guard_schema")
+    sql, params = conn.executed[0]
+    assert "[span_db].information_schema.tables" in sql
+    assert params == ("records", "guard_schema")
+    assert MSSQL.namespace_prefix("span_db.guard_schema") == "[span_db].[guard_schema]."
+
+
 def test_sqlite_introspection_is_unchanged_by_schema_scoping() -> None:
     conn = RecordingConnection()
     table_exists(conn, "records", dialect=SQLITE)

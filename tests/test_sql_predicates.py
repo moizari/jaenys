@@ -203,6 +203,23 @@ def test_attached_version_id_against_unversioned_store_refuses(
                 guard.predicate("r", version_id=1)
 
 
+def test_incomplete_versioned_layer_refuses_before_query(store_pair: tuple[Path, Path]) -> None:
+    primary, span = store_pair
+    build_primary_db(primary, [0, 0])
+    conn = sqlite3.connect(span)
+    conn.execute("CREATE TABLE span_members (record_id INTEGER)")
+    conn.execute("CREATE TABLE spans (source_version_id INTEGER)")
+    conn.execute("INSERT INTO spans VALUES (1)")
+    conn.commit()
+    conn.close()
+
+    with closing(sqlite.open_readonly(primary)) as conn:
+        with sqlite.attached_guard(conn, span) as guard:
+            assert "span_members.versioned" not in guard.span_sources
+            with pytest.raises(RedactionDriftError, match="no versioned span layer"):
+                guard.predicate("r", version_id=1)
+
+
 def test_filter_visible_ids_preserves_order_and_duplicates(
     store_pair: tuple[Path, Path],
 ) -> None:

@@ -43,7 +43,6 @@ from ..core import (
     Guard,
     RedactionDriftError,
     _coerce_int,
-    _safe_repr,
     coerce_flag,
     coerce_record_id,
     verify_drift_witness,
@@ -160,9 +159,51 @@ def _fetchone(conn: Any, dialect: Dialect, sql: str, params: Sequence[Any] = ())
     return conn.execute(rendered_sql, rendered_params).fetchone()
 
 
+def _iter_rows(
+    conn: Any,
+    dialect: Dialect,
+    sql: str,
+    params: Sequence[Any] = (),
+    *,
+    batch_size: int = 1000,
+) -> Iterator[tuple]:
+    """Stream statement rows without materializing a primary store in memory."""
+
+    rendered_sql, rendered_params = dialect.render(sql, params)
+    if hasattr(conn, "cursor"):
+        cursor = conn.cursor()
+        try:
+            cursor.execute(rendered_sql, rendered_params)
+            while rows := cursor.fetchmany(batch_size):
+                yield from rows
+        finally:
+            cursor.close()
+        return
+    cursor = conn.execute(rendered_sql, rendered_params)
+    try:
+        while rows := cursor.fetchmany(batch_size):
+            yield from rows
+    finally:
+        close = getattr(cursor, "close", None)
+        if close is not None:
+            close()
+
+
 # ---------------------------------------------------------------------------
 # Introspection
 # ---------------------------------------------------------------------------
+
+
+def _information_schema_relation(
+    dialect: Dialect, namespace: str | None, relation: str
+) -> tuple[str, str | None]:
+    """Return an information-schema relation and the schema filter to use."""
+
+    parts = dialect.namespace_parts(namespace)
+    if dialect.name == "mssql" and len(parts) == 2:
+        database, schema = parts
+        return f"{dialect.quote_identifier(database)}.information_schema.{relation}", schema
+    return f"information_schema.{relation}", namespace
 
 
 def table_exists(
@@ -189,11 +230,14 @@ def table_exists(
             sql += " AND upper(owner) = upper(?)"
             params += (namespace,)
         return _fetchone(conn, dialect, sql, params) is not None
-    sql = "SELECT table_name FROM information_schema.tables WHERE lower(table_name) = lower(?)"
+    information_schema_tables, schema_namespace = _information_schema_relation(
+        dialect, namespace, "tables"
+    )
+    sql = f"SELECT table_name FROM {information_schema_tables} WHERE lower(table_name) = lower(?)"
     params = (table_name,)
-    if namespace:
+    if schema_namespace:
         sql += " AND lower(table_schema) = lower(?)"
-        params += (namespace,)
+        params += (schema_namespace,)
     elif dialect.current_schema_expr:
         # Unqualified lookups must not false-positive on a same-named table in
         # another schema.  The expression is a trusted dialect constant, not
@@ -224,11 +268,14 @@ def table_columns(
             sql += " AND upper(owner) = upper(?)"
             params += (namespace,)
         return {str(row[0]).lower() for row in _fetchall(conn, dialect, sql, params)}
-    sql = "SELECT column_name FROM information_schema.columns WHERE lower(table_name) = lower(?)"
+    information_schema_columns, schema_namespace = _information_schema_relation(
+        dialect, namespace, "columns"
+    )
+    sql = f"SELECT column_name FROM {information_schema_columns} WHERE lower(table_name) = lower(?)"
     params = (table_name,)
-    if namespace:
+    if schema_namespace:
         sql += " AND lower(table_schema) = lower(?)"
-        params += (namespace,)
+        params += (schema_namespace,)
     elif dialect.current_schema_expr:
         # Same-named tables in other schemas would otherwise union their
         # columns into this result.  Trusted dialect constant, not user input.
@@ -260,15 +307,19 @@ def span_sources(
             if (
                 mapping.span_group_table is not None
                 and mapping.span_group_version_column is not None
+                and mapping.span_group_id_column.lower() in columns
                 and table_exists(
                     conn, mapping.span_group_table, dialect=dialect, namespace=namespace
                 )
-                and mapping.span_group_version_column.lower()
-                in table_columns(
+            ):
+                group_columns = table_columns(
                     conn, mapping.span_group_table, dialect=dialect, namespace=namespace
                 )
-            ):
-                sources.append(SOURCE_MEMBERS_VERSIONED)
+                if {
+                    mapping.span_group_id_column.lower(),
+                    mapping.span_group_version_column.lower(),
+                } <= group_columns:
+                    sources.append(SOURCE_MEMBERS_VERSIONED)
     if table_exists(conn, mapping.mirror_table, dialect=dialect, namespace=namespace):
         columns = table_columns(conn, mapping.mirror_table, dialect=dialect, namespace=namespace)
         if {mapping.mirror_id_column.lower(), mapping.mirror_reason_column.lower()} <= columns:
@@ -585,12 +636,10 @@ def _has_flagged(conn: Any, *, mapping: SchemaMapping, dialect: Dialect) -> bool
 def _assert_primary_ids_well_formed(conn: Any, *, mapping: SchemaMapping, dialect: Dialect) -> None:
     """Refuse before serving unless the primary record ids are well formed.
 
-    A missing (NULL) id or a non-unique id breaks the ability to address a
-    flag or a span exclusion to one record, so either one refuses.  Both
-    checks run in SQL, so a broad serve path never has to read the whole
-    records table into memory: this stays cheap on a production-sized store,
-    which is the point of the anti-join topology.  Non-integer ids are caught
-    on the materialized read paths, which coerce every id they load.
+    A missing, duplicate, or non-integer id breaks the ability to address a
+    flag or a span exclusion to one record, so any of them refuses. Duplicate
+    detection stays in SQL. Id coercion streams in bounded batches so a broad
+    serve path does not materialize the primary store in memory.
     """
 
     table = dialect.quote_identifier(mapping.record_table)
@@ -608,22 +657,18 @@ def _assert_primary_ids_well_formed(conn: Any, *, mapping: SchemaMapping, dialec
         )
     counts = _fetchone(conn, dialect, f"SELECT COUNT(*), COUNT(DISTINCT {id_column}) FROM {table}")
     if counts is not None and counts[0] != counts[1]:
-        # Name the offending id (an identifier, not record content) so the
-        # operator can go straight to it.  Only runs on the failing path.
-        duplicate = _fetchone(
-            conn,
-            dialect,
-            f"SELECT {id_column} FROM {table} GROUP BY {id_column} HAVING COUNT(*) > 1",
-        )
-        if duplicate is not None:
-            raise RedactionDriftError(
-                f"record id {_safe_repr(duplicate[0])} in {mapping.record_table} is not unique; "
-                "give every row a distinct record id before serving."
-            )
         raise RedactionDriftError(
             f"record id values in {mapping.record_table} are not unique; "
             "give every row a distinct record id before serving."
         )
+    for (raw_id,) in _iter_rows(conn, dialect, f"SELECT {id_column} FROM {table}"):
+        try:
+            coerce_record_id(raw_id, origin=mapping.record_table)
+        except RedactionDriftError as exc:
+            raise RedactionDriftError(
+                f"a record id in {mapping.record_table} is not a supported integer; "
+                "correct it before serving."
+            ) from exc
 
 
 def _assert_primary_flags_well_formed(
@@ -631,35 +676,24 @@ def _assert_primary_flags_well_formed(
 ) -> None:
     """Refuse if any primary flag is missing or outside ``{0, 1}``.
 
-    This is the health-report check: ``status`` surfaces malformed flag data
-    instead of quietly dropping it.  Serving does not depend on it, because
-    every serve predicate already excludes such rows one at a time (``flag =
-    0`` / ``flag IN (0, 1)`` never match a NULL or corrupt flag), so one bad
-    row cannot take the whole dataset offline.  Run in SQL to stay cheap.
+    The check is shared by every SQL serve path and the status report. It
+    streams rows in bounded batches so a malformed flag refuses the operation
+    without materializing the primary store in memory.
     """
 
     table = dialect.quote_identifier(mapping.record_table)
     id_column = dialect.quote_identifier(mapping.record_id_column)
     flag_column = dialect.quote_identifier(mapping.flag_column)
-    # Fetch the offending row's id (an identifier, not record content) so the
-    # operator can go straight to it.  Ids are validated first, so the id read
-    # back here is present.
-    missing_flag = _fetchone(
-        conn, dialect, f"SELECT {id_column} FROM {table} WHERE {flag_column} IS NULL"
-    )
-    if missing_flag is not None:
-        raise RedactionDriftError(
-            f"record {_safe_repr(missing_flag[0])} in {mapping.record_table} has no flag; "
-            "set it to 0 or 1 before serving."
-        )
-    bad_flag = _fetchone(
-        conn, dialect, f"SELECT {id_column} FROM {table} WHERE {flag_column} NOT IN (0, 1)"
-    )
-    if bad_flag is not None:
-        raise RedactionDriftError(
-            f"record {_safe_repr(bad_flag[0])} in {mapping.record_table} has a flag that is "
-            "not 0 or 1; correct it to 0 or 1 before serving."
-        )
+    for _raw_id, raw_flag in _iter_rows(
+        conn, dialect, f"SELECT {id_column}, {flag_column} FROM {table}"
+    ):
+        try:
+            coerce_flag(raw_flag, origin=mapping.record_table)
+        except RedactionDriftError as exc:
+            raise RedactionDriftError(
+                f"a record in {mapping.record_table} has a flag that is not 0 or 1; "
+                "correct it before serving."
+            ) from exc
 
 
 def _drift_witness(
@@ -749,6 +783,7 @@ def assert_guard_current(
     with _fail_closed(guard.origin or "primary store"):
         resolved = dialect_for(dialect) if dialect is not None else dialect_for(conn)
         _assert_primary_ids_well_formed(conn, mapping=mapping, dialect=resolved)
+        _assert_primary_flags_well_formed(conn, mapping=mapping, dialect=resolved)
         live = _flagged_ids(conn, mapping=mapping, dialect=resolved)
         verify_guard_current(live, guard)
         witness = _drift_witness(conn, mapping=mapping, dialect=resolved)
@@ -987,6 +1022,7 @@ def guard_for_connection(
         resolved = dialect_for(dialect) if dialect is not None else dialect_for(conn)
         resolved_namespace = namespace if namespace is not None else mapping.span_namespace
         _assert_primary_ids_well_formed(conn, mapping=mapping, dialect=resolved)
+        _assert_primary_flags_well_formed(conn, mapping=mapping, dialect=resolved)
         if not span_layer_ready:
             if _has_flagged(conn, mapping=mapping, dialect=resolved):
                 raise RedactionDriftError(
@@ -1208,7 +1244,7 @@ def status(
         visible = flag0_total - span_only_hidden
         visible_or_blur = wellformed_total - span_wellformed_hidden
         witness = _drift_witness(conn, mapping=mapping, dialect=resolved)
-        return {
+        report = {
             "records": total,
             "flagged": flagged,
             "visible_normal_records": visible,
@@ -1232,3 +1268,11 @@ def status(
                 f"{mapping.flag_column} in (0, 1) AND {mapping.record_id_column} not in spans"
             ),
         }
+        try:
+            assert_guard_current(conn, guard, mapping=mapping, dialect=resolved)
+        except RedactionDriftError as exc:
+            report["layers_in_sync"] = False
+            report["refusal"] = str(exc)
+        else:
+            report["layers_in_sync"] = True
+        return report

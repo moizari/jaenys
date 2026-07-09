@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Sequence
 
-from ..core import RedactionDriftError, validate_name
+from ..core import RedactionDriftError, validate_name, validate_namespace
 
 __all__ = [
     "Dialect",
@@ -109,11 +109,30 @@ class Dialect:
         return f"{self.quote_identifier(alias)}.{quoted}"
 
     def namespace_prefix(self, namespace: str | None) -> str:
-        """Return ``"ns".`` (quoted, dot-suffixed) or ``""`` when unqualified."""
+        """Return a quoted namespace prefix or ``""`` when unqualified."""
 
         if not namespace:
             return ""
-        return f"{self.quote_identifier(namespace)}."
+        validate_namespace(namespace, kind="SQL namespace")
+        parts = namespace.split(".")
+        if len(parts) == 2 and self.name != "mssql":
+            raise RedactionDriftError(
+                f"database.schema namespaces are supported only by mssql, not {self.name}"
+            )
+        return "".join(f"{self.quote_identifier(part)}." for part in parts)
+
+    def namespace_parts(self, namespace: str | None) -> tuple[str, ...]:
+        """Return validated namespace identifiers for introspection helpers."""
+
+        if not namespace:
+            return ()
+        validate_namespace(namespace, kind="SQL namespace")
+        parts = tuple(namespace.split("."))
+        if len(parts) == 2 and self.name != "mssql":
+            raise RedactionDriftError(
+                f"database.schema namespaces are supported only by mssql, not {self.name}"
+            )
+        return parts
 
     # -- parameter rendering -------------------------------------------------
 
